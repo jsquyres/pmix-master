@@ -1495,49 +1495,32 @@ void pmix_server_purge_events(pmix_peer_t *peer, pmix_proc_t *proc)
 void pmix_server_peer_finalized(pmix_peer_t *peer)
 {
     pmix_rank_info_t *info = peer->info;
-    pmix_namespace_t *nptr = peer->nptr;
-    int idx = peer->index;
-    pmix_peer_t *sib;
-    int i;
 
-    /* this process is gone - reduce the rank's live-process count */
+    /* This is a cleanly-finalized local client whose socket has now
+     * dropped. Do the MINIMUM here: reduce the rank's live-process count.
+     * We deliberately do NOT free the peer, null its clients-array slot,
+     * or repoint info->peerid at socket-close time. lost_connection has
+     * already stopped the peer's events and closed its socket, and
+     * peer->finalized is true, so the object is inert to every
+     * finalized-guarded send path - it is a harmless tombstone left in
+     * place at its existing clients slot.
+     *
+     * Mutating shared per-namespace/per-rank state here (freeing the
+     * object, nulling the array slot, or moving info->peerid) races with
+     * concurrent spawn/connect/disconnect collectives and direct-modex
+     * gets that walk the clients array and the rank list while a peer is
+     * departing - an architecture- and timing-sensitive hang of
+     * multi-local-process MPI_Comm_spawn. The tombstone is reclaimed at a
+     * safe point instead: when the rank reconnects on the next PMIx_Init
+     * (the connection handler frees the stale tombstone before allocating
+     * a fresh peer), or when the namespace is deregistered. Keeping the
+     * peer counted as finalized (nfinalized is left untouched here and
+     * decremented only when the tombstone is reclaimed on reconnect) is
+     * what keeps nfinalized from drifting across init/finalize cycles.
+     * See docs/how-things-work/init-finalize.rst. */
     if (NULL != info && 0 < info->proc_cnt) {
         --info->proc_cnt;
     }
-
-    /* Release the departed peer so it does not stay stranded in the
-     * clients array until the nspace is deregistered. We deliberately do
-     * NOT recycle the object in place: destructing and reconstructing a
-     * pmix_peer_t that is still reachable from the clients array (and
-     * whose embedded libevent structures and rank_info alias other state)
-     * is fragile - the reuse was only an allocation optimization, and a
-     * subsequent PMIx_Init for this rank simply allocates a fresh peer.
-     * PMIX_RELEASE only drops our reference; if a pending collective or an
-     * active sensor still holds one, the object survives until that last
-     * holder frees it.
-     *
-     * Releasing undoes the finalized state, so undo the count that
-     * FINALIZE_CMD added. */
-    if (0 < nptr->nfinalized) {
-        --nptr->nfinalized;
-    }
-    /* If this peer was the rank's referenced peer, repoint peerid so a
-     * concurrent local PMIx_Get for the rank still resolves: to a
-     * surviving sibling if one is still live (a clone), else to -1. */
-    if (NULL != info && info->peerid == idx) {
-        info->peerid = -1;
-        if (0 < info->proc_cnt) {
-            for (i = 0; i < pmix_server_globals.clients.size; i++) {
-                sib = (pmix_peer_t *) pmix_pointer_array_get_item(&pmix_server_globals.clients, i);
-                if (NULL != sib && sib != peer && sib->info == info) {
-                    info->peerid = i;
-                    break;
-                }
-            }
-        }
-    }
-    pmix_pointer_array_set_item(&pmix_server_globals.clients, idx, NULL);
-    PMIX_RELEASE(peer);
 }
 
 static void remove_client(pmix_namespace_t *nptr, pmix_proc_t *p)
