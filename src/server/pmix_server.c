@@ -1496,48 +1496,21 @@ void pmix_server_peer_finalized(pmix_peer_t *peer)
 {
     pmix_rank_info_t *info = peer->info;
     pmix_namespace_t *nptr = peer->nptr;
-    int idx = peer->index;
-    pmix_peer_t *sib;
-    int i;
 
     /* this process is gone - reduce the rank's live-process count */
     if (NULL != info && 0 < info->proc_cnt) {
         --info->proc_cnt;
     }
 
-    /* Release the departed peer so it does not stay stranded in the
-     * clients array until the nspace is deregistered. We deliberately do
-     * NOT recycle the object in place: destructing and reconstructing a
-     * pmix_peer_t that is still reachable from the clients array (and
-     * whose embedded libevent structures and rank_info alias other state)
-     * is fragile - the reuse was only an allocation optimization, and a
-     * subsequent PMIx_Init for this rank simply allocates a fresh peer.
-     * PMIX_RELEASE only drops our reference; if a pending collective or an
-     * active sensor still holds one, the object survives until that last
-     * holder frees it.
-     *
-     * Releasing undoes the finalized state, so undo the count that
-     * FINALIZE_CMD added. */
+    /* DEBUG EXPERIMENT (accounting-only): keep the nfinalized bookkeeping
+     * that FINALIZE_CMD's increment requires, but do NOT free the peer,
+     * do NOT null its clients slot, and do NOT repoint peerid. The peer
+     * object is left stranded in the clients array (the pre-73114685 leak)
+     * so we can isolate whether the spawn hang is caused by the object
+     * teardown/array mutation or by the count accounting alone. */
     if (0 < nptr->nfinalized) {
         --nptr->nfinalized;
     }
-    /* If this peer was the rank's referenced peer, repoint peerid so a
-     * concurrent local PMIx_Get for the rank still resolves: to a
-     * surviving sibling if one is still live (a clone), else to -1. */
-    if (NULL != info && info->peerid == idx) {
-        info->peerid = -1;
-        if (0 < info->proc_cnt) {
-            for (i = 0; i < pmix_server_globals.clients.size; i++) {
-                sib = (pmix_peer_t *) pmix_pointer_array_get_item(&pmix_server_globals.clients, i);
-                if (NULL != sib && sib != peer && sib->info == info) {
-                    info->peerid = i;
-                    break;
-                }
-            }
-        }
-    }
-    pmix_pointer_array_set_item(&pmix_server_globals.clients, idx, NULL);
-    PMIX_RELEASE(peer);
 }
 
 static void remove_client(pmix_namespace_t *nptr, pmix_proc_t *p)
